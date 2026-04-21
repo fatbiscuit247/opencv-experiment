@@ -1,6 +1,7 @@
-# basicopencv-beautyfilter
+# opencv-experiment
 
-Implemented basic smoothing filter. 
+Experimenting with opencv's filters. Currently using webcam
+
 A real-time beauty filter using OpenCV's DNN face detector and bilateral smoothing.  
 Built as a side project to explore computer vision fundamentals — face detection, facial masking, and selective image processing.
 
@@ -18,7 +19,7 @@ This approach is meaningfully different from naive circular blurring — it targ
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/YOUR_USERNAME/opencv-beautyfilter.git
+git clone https://github.com/YOUR_USERNAME/opencv-experiment.git
 cd opencv-beautyfilter
 
 # 2. Install dependencies
