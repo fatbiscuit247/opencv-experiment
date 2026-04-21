@@ -26,7 +26,7 @@ def cool(frame):
 
 def vivid(frame):
     """Vivid: strong saturation boost with slight brightness lift."""
-    return _hsv_adjust(frame, s_scale=1.6, v_scale=1.05)
+    return _hsv_adjust(frame, s_scale=1.0, v_scale=1.1)
 
 def fade(frame):
     """Fade: desaturated with lifted shadows, matte film look."""
