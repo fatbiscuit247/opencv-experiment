@@ -1,8 +1,11 @@
 import cv2
+cv2.ocl.setUseOpenCL(True)
 import numpy as np
 import importlib
 import sys
 import filters
+
+
 
 # ---------------------------------------------------------------------------
 # Layout constants

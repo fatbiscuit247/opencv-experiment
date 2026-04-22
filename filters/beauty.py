@@ -1,6 +1,9 @@
 import cv2
+cv2.ocl.setUseOpenCL(True)
 import numpy as np
 import dlib
+
+
 
 # ---------------------------------------------------------------------------
 # Landmark index ranges (dlib 68-point model)
@@ -13,8 +16,27 @@ LEFT_EYE    = list(range(42, 48))
 OUTER_LIP   = list(range(48, 60))
 INNER_LIP   = list(range(60, 68))
 
+SLIM_STRENGTH = 0.011  # preserved from your tuning
+BILATERAL_D   = 9      # reduced from 15 for performance (minimal quality loss)
+BILATERAL_SIG = 15     # preserved from your tuning
+
 _face_net  = None
 _predictor = None
+
+# ---------------------------------------------------------------------------
+# Warp map cache — only recompute when face moves significantly
+# ---------------------------------------------------------------------------
+_cached_map_x     = None
+_cached_map_y     = None
+_cached_landmarks = None
+LANDMARK_MOVE_THRESHOLD = 4.0  # pixels
+
+def _landmarks_moved(new_lm):
+    global _cached_landmarks
+    if _cached_landmarks is None:
+        return True
+    diff = np.array(new_lm, dtype=np.float32) - np.array(_cached_landmarks, dtype=np.float32)
+    return np.max(np.abs(diff)) > LANDMARK_MOVE_THRESHOLD
 
 def _get_face_net():
     global _face_net
@@ -82,75 +104,46 @@ def build_skin_mask(frame, face, landmarks):
     face_mask = cv2.GaussianBlur(face_mask, (21, 21), 0)
     return face_mask
 
-# ---------------------------------------------------------------------------
-# Face slimming via landmark-guided warp via cv2.remap
-# ---------------------------------------------------------------------------
-SLIM_STRENGTH = 0.011  # 0.0 = no effect, 0.2 = strong, tweak here
-
-def slim_face(frame, landmarks):
-    """
-    Warps jaw landmarks inward toward the face center using cv2.remap.
-    Only the jaw region (points 0-16) is pulled in — cheekbones, chin etc.
-    The warp uses a radial falloff so the effect fades naturally away from
-    each jaw point, avoiding sharp distortion edges.
-    """
+def _build_warp_maps(frame, landmarks):
+    global _cached_map_x, _cached_map_y, _cached_landmarks
     h, w = frame.shape[:2]
-
-    # Build identity map (each pixel maps to itself)
     map_x = np.arange(w, dtype=np.float32)
     map_y = np.arange(h, dtype=np.float32)
     map_x, map_y = np.meshgrid(map_x, map_y)
 
-    # Face center — used as the direction to pull jaw points toward
     all_pts = np.array(landmarks, dtype=np.float32)
     face_center = all_pts.mean(axis=0)
 
-    # For each jaw point, apply a localized inward pull
-    jaw_pts = [landmarks[i] for i in JAW]
-    for pt in jaw_pts:
+    for pt in [landmarks[i] for i in JAW]:
         px, py = float(pt[0]), float(pt[1])
-
-        # Direction vector: from jaw point toward face center
         dx = face_center[0] - px
         dy = face_center[1] - py
         dist_to_center = np.sqrt(dx * dx + dy * dy) + 1e-6
         nx, ny = dx / dist_to_center, dy / dist_to_center
-
-        # Influence radius — scales with face size
         radius = dist_to_center * 0.55
-
-        # Distance of every pixel from this jaw point
         pixel_dist = np.sqrt((map_x - px) ** 2 + (map_y - py) ** 2)
-
-        # Smooth falloff: pixels close to jaw point get pulled more
         weight = np.clip(1.0 - pixel_dist / radius, 0, 1) ** 2
         pull = SLIM_STRENGTH * dist_to_center * weight
-
         map_x -= pull * nx
         map_y -= pull * ny
 
-    return cv2.remap(frame, map_x, map_y, cv2.INTER_LINEAR,
-                     borderMode=cv2.BORDER_REFLECT)
+    _cached_map_x = map_x
+    _cached_map_y = map_y
+    _cached_landmarks = landmarks
 
-# ---------------------------------------------------------------------------
-# Main apply function
-# ---------------------------------------------------------------------------
+def slim_face(frame, landmarks):
+    if _landmarks_moved(landmarks):
+        _build_warp_maps(frame, landmarks)
+    return cv2.remap(frame, _cached_map_x, _cached_map_y,
+                     cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
 
 def apply(frame):
-    """
-    Full beauty enhancement pipeline:
-    1. Detect face
-    2. Get 68-point landmarks
-    3. Bilateral smooth skin (landmark-masked, features preserved)
-    4. Slim jaw via landmark warp
-    """
     output = frame.copy()
     faces = detect_faces(frame)
     if not faces:
         return output
 
-    # Step 1: Skin smoothing
-    smoothed = cv2.bilateralFilter(frame, 15, 15, 15)
+    smoothed = cv2.bilateralFilter(frame, BILATERAL_D, BILATERAL_SIG, BILATERAL_SIG)
     result = smoothed.astype(np.float32)
     result[:, :, 2] = np.clip(result[:, :, 2] * 1.04, 0, 255)
     result[:, :, 1] = np.clip(result[:, :, 1] * 1.02, 0, 255)
@@ -159,14 +152,10 @@ def apply(frame):
 
     for face in faces:
         landmarks = get_landmarks(frame, face)
-
-        # Composite smoothed skin onto original (feature-aware mask)
         mask = build_skin_mask(frame, face, landmarks)
         mask_3ch = cv2.merge([mask, mask, mask]).astype(np.float32) / 255.0
         output = (output.astype(np.float32) * (1 - mask_3ch) +
                   smoothed.astype(np.float32) * mask_3ch).astype(np.uint8)
-
-        # Step 2: Slim jaw
         output = slim_face(output, landmarks)
 
     return output
