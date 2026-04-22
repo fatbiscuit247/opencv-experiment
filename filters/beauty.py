@@ -1,35 +1,78 @@
 import cv2
-cv2.ocl.setUseOpenCL(True)
 import numpy as np
-import dlib
+import mediapipe as mp
+from mediapipe.tasks import python
+from mediapipe.tasks.python import vision
+import urllib.request
+import os
 
-
-
-# ---------------------------------------------------------------------------
-# Landmark index ranges (dlib 68-point model)
-# ---------------------------------------------------------------------------
-JAW         = list(range(0, 17))
-RIGHT_BROW  = list(range(17, 22))
-LEFT_BROW   = list(range(22, 27))
-RIGHT_EYE   = list(range(36, 42))
-LEFT_EYE    = list(range(42, 48))
-OUTER_LIP   = list(range(48, 60))
-INNER_LIP   = list(range(60, 68))
-
-SLIM_STRENGTH = 0.011  # preserved from your tuning
-BILATERAL_D   = 9      # reduced from 15 for performance (minimal quality loss)
-BILATERAL_SIG = 15     # preserved from your tuning
-
-_face_net  = None
-_predictor = None
+cv2.ocl.setUseOpenCL(True)
 
 # ---------------------------------------------------------------------------
-# Warp map cache — only recompute when face moves significantly
+# Download MediaPipe face landmark model if needed
 # ---------------------------------------------------------------------------
+MODEL_PATH = "models/face_landmarker.task"
+
+def _ensure_model():
+    if not os.path.exists(MODEL_PATH):
+        os.makedirs("models", exist_ok=True)
+        print("Downloading MediaPipe face landmarker model...")
+        urllib.request.urlretrieve(
+            "https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task",
+            MODEL_PATH
+        )
+        print("Model ready.")
+
+# ---------------------------------------------------------------------------
+# MediaPipe landmark index groups (478-point model)
+# ---------------------------------------------------------------------------
+JAW       = [10, 338, 297, 332, 284, 251, 389, 356, 454, 323, 361, 288,
+             397, 365, 379, 378, 400, 377, 152, 148, 176, 149, 150, 136,
+             172, 58, 132, 93, 234, 127, 162, 21, 54, 103, 67, 109]
+RIGHT_EYE = [33, 7, 163, 144, 145, 153, 154, 155, 133, 173, 157, 158,
+             159, 160, 161, 246]
+LEFT_EYE  = [362, 382, 381, 380, 374, 373, 390, 249, 263, 466, 388, 387,
+             386, 385, 384, 398]
+RIGHT_BROW = [70, 63, 105, 66, 107, 55, 65, 52, 53, 46]
+LEFT_BROW  = [300, 293, 334, 296, 336, 285, 295, 282, 283, 276]
+OUTER_LIP  = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375, 291,
+              409, 270, 269, 267, 0, 37, 39, 40, 185]
+INNER_LIP  = [78, 95, 88, 178, 87, 14, 317, 402, 318, 324, 308,
+              415, 310, 311, 312, 13, 82, 81, 80, 191]
+
+SLIM_STRENGTH = 0.011
+BILATERAL_D   = 9
+BILATERAL_SIG = 15
+
+PROCESS_EVERY_N_FRAMES = 3
+_frame_count = 0
+_last_output = None
+
 _cached_map_x     = None
 _cached_map_y     = None
 _cached_landmarks = None
-LANDMARK_MOVE_THRESHOLD = 4.0  # pixels
+LANDMARK_MOVE_THRESHOLD = 4.0
+
+_landmarker = None
+
+def _get_landmarker():
+    global _landmarker
+    if _landmarker is None:
+        _ensure_model()
+        base_options = python.BaseOptions(model_asset_path=MODEL_PATH)
+        options = vision.FaceLandmarkerOptions(
+            base_options=base_options,
+            output_face_blendshapes=False,
+            output_facial_transformation_matrixes=False,
+            num_faces=1,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
+            running_mode=vision.RunningMode.IMAGE
+        )
+        _landmarker = vision.FaceLandmarker.create_from_options(options)
+    return _landmarker
+
 
 def _landmarks_moved(new_lm):
     global _cached_landmarks
@@ -38,56 +81,38 @@ def _landmarks_moved(new_lm):
     diff = np.array(new_lm, dtype=np.float32) - np.array(_cached_landmarks, dtype=np.float32)
     return np.max(np.abs(diff)) > LANDMARK_MOVE_THRESHOLD
 
-def _get_face_net():
-    global _face_net
-    if _face_net is None:
-        _face_net = cv2.dnn.readNetFromCaffe(
-            "models/deploy.prototxt",
-            "models/res10_300x300_ssd_iter_140000.caffemodel"
-        )
-    return _face_net
 
-def _get_predictor():
-    global _predictor
-    if _predictor is None:
-        _predictor = dlib.shape_predictor(
-            "models/shape_predictor_68_face_landmarks.dat"
-        )
-    return _predictor
-
-def detect_faces(frame):
-    net = _get_face_net()
+def get_landmarks_and_bbox(frame):
+    landmarker = _get_landmarker()
     h, w = frame.shape[:2]
-    blob = cv2.dnn.blobFromImage(frame, 1.0, (300, 300), (104.0, 177.0, 123.0))
-    net.setInput(blob)
-    detections = net.forward()
-    faces = []
-    for i in range(detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
-        if confidence > 0.5:
-            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-            x1, y1, x2, y2 = box.astype(int)
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(w, x2), min(h, y2)
-            faces.append((x1, y1, x2 - x1, y2 - y1))
-    return faces
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+    result = landmarker.detect(mp_image)
 
-def get_landmarks(frame, face):
-    predictor = _get_predictor()
-    x, y, w, h = face
-    rect = dlib.rectangle(x, y, x + w, y + h)
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    shape = predictor(gray, rect)
-    return [(shape.part(i).x, shape.part(i).y) for i in range(68)]
+    if not result.face_landmarks:
+        return None, None
 
-def _points_to_mask(shape, indices, frame_shape, padding=0):
-    pts = np.array([shape[i] for i in indices], dtype=np.int32)
+    face_lm = result.face_landmarks[0]
+    landmarks = [(int(lm.x * w), int(lm.y * h)) for lm in face_lm]
+
+    xs = [p[0] for p in landmarks]
+    ys = [p[1] for p in landmarks]
+    x1, y1 = max(0, min(xs)), max(0, min(ys))
+    x2, y2 = min(w, max(xs)), min(h, max(ys))
+    face = (x1, y1, x2 - x1, y2 - y1)
+
+    return landmarks, face
+
+
+def _points_to_mask(landmarks, indices, frame_shape, padding=0):
+    pts = np.array([landmarks[i] for i in indices], dtype=np.int32)
     if padding > 0:
         center = pts.mean(axis=0)
         pts = (pts + (pts - center) * padding).astype(np.int32)
     mask = np.zeros(frame_shape[:2], dtype=np.uint8)
     cv2.fillConvexPoly(mask, cv2.convexHull(pts), 255)
     return mask
+
 
 def build_skin_mask(frame, face, landmarks):
     x, y, w, h = face
@@ -104,6 +129,7 @@ def build_skin_mask(frame, face, landmarks):
     face_mask = cv2.GaussianBlur(face_mask, (21, 21), 0)
     return face_mask
 
+
 def _build_warp_maps(frame, landmarks):
     global _cached_map_x, _cached_map_y, _cached_landmarks
     h, w = frame.shape[:2]
@@ -114,8 +140,8 @@ def _build_warp_maps(frame, landmarks):
     all_pts = np.array(landmarks, dtype=np.float32)
     face_center = all_pts.mean(axis=0)
 
-    for pt in [landmarks[i] for i in JAW]:
-        px, py = float(pt[0]), float(pt[1])
+    for i in JAW:
+        px, py = float(landmarks[i][0]), float(landmarks[i][1])
         dx = face_center[0] - px
         dy = face_center[1] - py
         dist_to_center = np.sqrt(dx * dx + dy * dy) + 1e-6
@@ -131,17 +157,25 @@ def _build_warp_maps(frame, landmarks):
     _cached_map_y = map_y
     _cached_landmarks = landmarks
 
+
 def slim_face(frame, landmarks):
     if _landmarks_moved(landmarks):
         _build_warp_maps(frame, landmarks)
     return cv2.remap(frame, _cached_map_x, _cached_map_y,
                      cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
 
+
 def apply(frame):
-    output = frame.copy()
-    faces = detect_faces(frame)
-    if not faces:
-        return output
+    global _frame_count, _last_output
+    _frame_count += 1
+
+    if _last_output is not None and _frame_count % PROCESS_EVERY_N_FRAMES != 0:
+        return _last_output
+
+    landmarks, face = get_landmarks_and_bbox(frame)
+    if landmarks is None:
+        _last_output = frame.copy()
+        return _last_output
 
     smoothed = cv2.bilateralFilter(frame, BILATERAL_D, BILATERAL_SIG, BILATERAL_SIG)
     result = smoothed.astype(np.float32)
@@ -150,12 +184,11 @@ def apply(frame):
     result[:, :, 0] = np.clip(result[:, :, 0] * 0.97, 0, 255)
     smoothed = result.astype(np.uint8)
 
-    for face in faces:
-        landmarks = get_landmarks(frame, face)
-        mask = build_skin_mask(frame, face, landmarks)
-        mask_3ch = cv2.merge([mask, mask, mask]).astype(np.float32) / 255.0
-        output = (output.astype(np.float32) * (1 - mask_3ch) +
-                  smoothed.astype(np.float32) * mask_3ch).astype(np.uint8)
-        output = slim_face(output, landmarks)
+    mask = build_skin_mask(frame, face, landmarks)
+    mask_3ch = cv2.merge([mask, mask, mask]).astype(np.float32) / 255.0
+    output = (frame.astype(np.float32) * (1 - mask_3ch) +
+              smoothed.astype(np.float32) * mask_3ch).astype(np.uint8)
+    output = slim_face(output, landmarks)
 
+    _last_output = output
     return output
