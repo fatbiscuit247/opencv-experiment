@@ -8,6 +8,7 @@ env/
 
 # Models (large binary files — download via download_models.py)
 models/*.caffemodel
+models/*.dat
 
 # Snapshots
 snapshot.jpg
