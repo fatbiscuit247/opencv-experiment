@@ -192,3 +192,7 @@ def apply(frame):
 
     _last_output = output
     return output
+
+def get_last_landmarks():
+    """Return the most recently cached landmarks for use by overlays."""
+    return _cached_landmarks

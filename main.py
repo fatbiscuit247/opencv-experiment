@@ -4,6 +4,10 @@ import numpy as np
 import importlib
 import sys
 import filters
+from filters.beauty import apply as beauty_apply, get_last_landmarks, get_landmarks_and_bbox
+from filters.overlays import apply_cat_ears
+
+
 
 
 
@@ -19,9 +23,11 @@ THUMB_H       = 72
 THUMB_PADDING = 10
 THUMB_Y       = MAIN_H + 60
 
-BTN_W, BTN_H  = 160, 30
-BTN_X         = (CANVAS_W - BTN_W) // 2
+BTN_W, BTN_H  = 150, 30
+BTN_GAP       = 10
 BTN_Y         = MAIN_H + 12
+BTN1_X        = (CANVAS_W - BTN_W * 2 - BTN_GAP) // 2
+BTN2_X        = BTN1_X + BTN_W + BTN_GAP
 
 THUMB_UPDATE_EVERY = 15
 
@@ -30,6 +36,7 @@ THUMB_UPDATE_EVERY = 15
 # ---------------------------------------------------------------------------
 selected  = 0
 beauty_on = False
+overlay_on = False
 
 def get_filter_list():
     return [
@@ -54,11 +61,14 @@ def get_thumb_x(i, n):
     return start_x + i * (THUMB_W + THUMB_PADDING)
 
 def mouse_callback(event, x, y, flags, param):
-    global selected, beauty_on
+    global selected, beauty_on, overlay_on
     if event != cv2.EVENT_LBUTTONDOWN:
         return
-    if BTN_X <= x <= BTN_X + BTN_W and BTN_Y <= y <= BTN_Y + BTN_H:
+    if BTN1_X <= x <= BTN1_X + BTN_W and BTN_Y <= y <= BTN_Y + BTN_H:
         beauty_on = not beauty_on
+        return
+    if BTN2_X <= x <= BTN2_X + BTN_W and BTN_Y <= y <= BTN_Y + BTN_H:
+        overlay_on = not overlay_on
         return
     filter_list = get_filter_list()
     if y >= THUMB_Y:
@@ -68,15 +78,18 @@ def mouse_callback(event, x, y, flags, param):
                 selected = i
                 break
 
-def draw_beauty_toggle(canvas):
-    color = (60, 160, 60) if beauty_on else (60, 60, 60)
-    label = "Beauty: ON" if beauty_on else "Beauty: OFF"
-    cv2.rectangle(canvas, (BTN_X, BTN_Y), (BTN_X + BTN_W, BTN_Y + BTN_H), color, -1)
-    cv2.rectangle(canvas, (BTN_X, BTN_Y), (BTN_X + BTN_W, BTN_Y + BTN_H), (200, 200, 200), 1)
-    (tw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-    lx = BTN_X + (BTN_W - tw) // 2
-    cv2.putText(canvas, label, (lx, BTN_Y + 21),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+def draw_buttons(canvas):
+    for bx, label, active in [
+        (BTN1_X, "Beauty: ON" if beauty_on else "Beauty: OFF", beauty_on),
+        (BTN2_X, "Cat Ears: ON" if overlay_on else "Cat Ears: OFF", overlay_on),
+    ]:
+        color = (60, 160, 60) if active else (60, 60, 60)
+        cv2.rectangle(canvas, (bx, BTN_Y), (bx + BTN_W, BTN_Y + BTN_H), color, -1)
+        cv2.rectangle(canvas, (bx, BTN_Y), (bx + BTN_W, BTN_Y + BTN_H), (200, 200, 200), 1)
+        (tw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        lx = bx + (BTN_W - tw) // 2
+        cv2.putText(canvas, label, (lx, BTN_Y + 21),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
 
 def draw_canvas(main_frame, thumbs, filter_list):
     canvas = np.zeros((CANVAS_H, CANVAS_W, 3), dtype=np.uint8)
@@ -87,7 +100,7 @@ def draw_canvas(main_frame, thumbs, filter_list):
     oy = (MAIN_H - fh) // 2
     canvas[oy:oy + fh, ox:ox + fw] = main_frame
 
-    draw_beauty_toggle(canvas)
+    draw_buttons(canvas)
 
     n = len(filter_list)
     for i, (name, _) in enumerate(filter_list):
@@ -109,7 +122,13 @@ def apply_filters(frame, filter_list):
     _, color_fn = filter_list[selected]
     output = color_fn(frame)
     if beauty_on:
-        output = filters.beauty(output)
+        output = beauty_apply(output)
+    if overlay_on:
+        if beauty_on:
+            landmarks = get_last_landmarks()
+        else:
+            landmarks, _ = get_landmarks_and_bbox(output)
+        output = apply_cat_ears(output, landmarks)
     return output
 
 def main():
