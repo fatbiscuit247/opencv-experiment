@@ -3,10 +3,11 @@ cv2.ocl.setUseOpenCL(True)
 import numpy as np
 import sys
 import filters
-from filters.beauty  import apply as beauty_apply, get_last_landmarks, get_landmarks_and_bbox
+from filters.beauty   import apply as beauty_apply, get_last_landmarks, get_landmarks_and_bbox
 from filters.overlays import apply_cat_ears
-from filters.makeup  import apply as makeup_apply
-import filters.liquify as liquify
+from filters.makeup   import apply as makeup_apply
+import filters.liquify  as liquify
+import filters.spotHeal as spotHeal
 
 # ---------------------------------------------------------------------------
 # Layout constants
@@ -16,7 +17,7 @@ MAIN_H        = 480
 STRIP_H       = 150
 CANVAS_H      = MAIN_H + STRIP_H
 MAKEUP_H      = 90
-LIQUIFY_H     = 55
+EDIT_H        = 80
 THUMB_W       = 96
 THUMB_H       = 72
 THUMB_PADDING = 10
@@ -36,29 +37,36 @@ THUMB_UPDATE_EVERY = 15
 # ---------------------------------------------------------------------------
 # Makeup presets
 # ---------------------------------------------------------------------------
-BLUSH_PRESETS = [("Pink", 160), ("Peach", 15), ("Coral", 8), ("Rose", 170), ("Berry", 145)]
-LIP_PRESETS   = [("Red", 0), ("Rose", 170), ("Pink", 160), ("Berry", 145), ("Nude", 15)]
+BLUSH_PRESETS = [("Pink", 160), ("Red", 0), ("Peach", 15), ("Coral", 8), ("Rose", 170), ("Berry", 145), ("Nude", 15)]
+LIP_PRESETS   = [("Pink", 160), ("Red", 0), ("Peach", 15), ("Coral", 8), ("Rose", 170), ("Berry", 145), ("Nude", 15)]
 
 SWATCH_R       = 11
 SWATCH_GAP     = 28
 SWATCH_START_X = 90
 BLUSH_ROW_Y    = CANVAS_H + 22
 LIP_ROW_Y      = CANVAS_H + 62
-OP_LABEL_X  = 480
-OP_BTN_X    = 570
-OP_BTN2_X   = 605
+OP_LABEL_X     = 480
+OP_BTN_X       = 570
+OP_BTN2_X      = 605
 OP_BTN_W       = 28
 OP_BTN_H       = 22
 
-# Liquify panel (sits below makeup panel if both on, else below strip)
-LIQ_BRUSH_LABEL_X = 10
-LIQ_BTN_MINUS_X = 215
-LIQ_BTN_PLUS_X  = 248
-LIQ_BTN_W          = 28
-LIQ_BTN_H          = 26
-LIQ_CLEAR_X     = 285
-LIQ_CLEAR_W        = 70
-LIQ_UNDO_X = 365
+# Edit panel constants
+EDIT_SUBMODE_Y    = 18    # y offset within panel for sub-mode buttons
+EDIT_SUB_W        = 90
+EDIT_SUB_H        = 26
+EDIT_SUB1_X       = 10
+EDIT_SUB2_X       = 108
+EDIT_SIZE_LABEL_X = 215
+EDIT_BTN_MINUS_X  = 310
+EDIT_BTN_PLUS_X   = 345
+EDIT_BTN_W        = 28
+EDIT_BTN_H        = 26
+EDIT_CLEAR_X      = 385
+EDIT_CLEAR_W      = 55
+EDIT_UNDO_X       = 448
+EDIT_UNDO_W       = 50
+EDIT_HINT_X       = 510
 
 # ---------------------------------------------------------------------------
 # State
@@ -67,8 +75,10 @@ selected      = 0
 beauty_on     = False
 overlay_on    = False
 makeup_on     = False
-liquify_on    = False
-liquify_radius = 60
+edit_on       = False
+edit_mode     = "liquify"   # "liquify" or "spotheal"
+edit_size     = 20
+
 _current_landmarks = None
 
 makeup_state = {
@@ -78,10 +88,9 @@ makeup_state = {
     "lip_op":    0,
 }
 
-# Drag state for liquify
-_drag_start   = None   # (canvas_x, canvas_y)
-_frame_ox     = 0      # frame offset in canvas — updated each frame
-_frame_oy     = 0
+_drag_start = None
+_frame_ox   = 0
+_frame_oy   = 0
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -113,31 +122,37 @@ def reload_filters():
     import filters as filters
     print("Filters reloaded.")
 
-def _liquify_panel_y():
-    """Top Y of the liquify panel depending on whether makeup panel is also open."""
+def _edit_panel_y():
     return CANVAS_H + (MAKEUP_H if makeup_on else 0)
 
 # ---------------------------------------------------------------------------
 # Mouse callback
 # ---------------------------------------------------------------------------
 def mouse_callback(event, x, y, flags, param):
-    global selected, beauty_on, overlay_on, makeup_on, liquify_on
-    global _drag_start, liquify_radius
+    global selected, beauty_on, overlay_on, makeup_on, edit_on
+    global _drag_start, edit_size, edit_mode
 
-    # ---- Liquify drag (only inside camera area) ----
-    if liquify_on and y < MAIN_H:
-        if event == cv2.EVENT_LBUTTONDOWN:
-            _drag_start = (x, y)
-            return
-        if event == cv2.EVENT_LBUTTONUP and _drag_start is not None:
-            fx0 = _drag_start[0] - _frame_ox
-            fy0 = _drag_start[1] - _frame_oy
-            dx  = x - _drag_start[0]
-            dy  = y - _drag_start[1]
-            if abs(dx) > 2 or abs(dy) > 2:
-                liquify.add_anchor(_current_landmarks, fx0, fy0, dx, dy, liquify_radius)
-            _drag_start = None
-            return
+    # ---- Edit interactions inside camera area ----
+    if edit_on and y < MAIN_H:
+        if edit_mode == "liquify":
+            if event == cv2.EVENT_LBUTTONDOWN:
+                _drag_start = (x, y)
+                return
+            if event == cv2.EVENT_LBUTTONUP and _drag_start is not None:
+                fx0 = _drag_start[0] - _frame_ox
+                fy0 = _drag_start[1] - _frame_oy
+                dx  = x - _drag_start[0]
+                dy  = y - _drag_start[1]
+                if abs(dx) > 2 or abs(dy) > 2:
+                    liquify.add_anchor(_current_landmarks, fx0, fy0, dx, dy, edit_size)
+                _drag_start = None
+                return
+        elif edit_mode == "spotheal":
+            if event == cv2.EVENT_LBUTTONDOWN:
+                fx = x - _frame_ox
+                fy = y - _frame_oy
+                spotHeal.add_spot(_current_landmarks, fx, fy, edit_size)
+                return
 
     if event != cv2.EVENT_LBUTTONDOWN:
         return
@@ -150,7 +165,7 @@ def mouse_callback(event, x, y, flags, param):
     if BTN3_X <= x <= BTN3_X + BTN_W and BTN_Y <= y <= BTN_Y + BTN_H:
         makeup_on = not makeup_on;  return
     if BTN4_X <= x <= BTN4_X + BTN_W and BTN_Y <= y <= BTN_Y + BTN_H:
-        liquify_on = not liquify_on;  return
+        edit_on = not edit_on;  return
 
     # ---- Filter thumbnails ----
     filter_list = get_filter_list()
@@ -162,14 +177,13 @@ def mouse_callback(event, x, y, flags, param):
 
     # ---- Makeup controls ----
     if makeup_on and CANVAS_H <= y <= CANVAS_H + MAKEUP_H:
-        _handle_makeup_click(x, y)
-        return
+        _handle_makeup_click(x, y);  return
 
-    # ---- Liquify controls ----
-    if liquify_on:
-        panel_y = _liquify_panel_y()
-        if panel_y <= y <= panel_y + LIQUIFY_H:
-            _handle_liquify_click(x, y, panel_y)
+    # ---- Edit panel controls ----
+    if edit_on:
+        panel_y = _edit_panel_y()
+        if panel_y <= y <= panel_y + EDIT_H:
+            _handle_edit_click(x, y, panel_y)
 
 def _handle_makeup_click(x, y):
     for i in range(len(BLUSH_PRESETS)):
@@ -182,37 +196,52 @@ def _handle_makeup_click(x, y):
             makeup_state["lip_idx"] = i;  return
     by = BLUSH_ROW_Y - OP_BTN_H // 2
     if OP_BTN_X <= x <= OP_BTN_X + OP_BTN_W and by <= y <= by + OP_BTN_H:
-        makeup_state["blush_op"] = max(0,   makeup_state["blush_op"] - 10);  return
+        makeup_state["blush_op"] = max(0,   makeup_state["blush_op"] - 5);  return
     if OP_BTN2_X <= x <= OP_BTN2_X + OP_BTN_W and by <= y <= by + OP_BTN_H:
-        makeup_state["blush_op"] = min(100, makeup_state["blush_op"] + 10);  return
+        makeup_state["blush_op"] = min(100, makeup_state["blush_op"] + 5);  return
     ly = LIP_ROW_Y - OP_BTN_H // 2
     if OP_BTN_X <= x <= OP_BTN_X + OP_BTN_W and ly <= y <= ly + OP_BTN_H:
-        makeup_state["lip_op"] = max(0,   makeup_state["lip_op"] - 10);  return
+        makeup_state["lip_op"] = max(0,   makeup_state["lip_op"] - 5);  return
     if OP_BTN2_X <= x <= OP_BTN2_X + OP_BTN_W and ly <= y <= ly + OP_BTN_H:
-        makeup_state["lip_op"] = min(100, makeup_state["lip_op"] + 10);  return
+        makeup_state["lip_op"] = min(100, makeup_state["lip_op"] + 5);  return
 
-def _handle_liquify_click(x, y, panel_y):
-    global liquify_radius
-    row_y = panel_y + LIQUIFY_H // 2
-    by = row_y - LIQ_BTN_H // 2
-    if LIQ_BTN_MINUS_X <= x <= LIQ_BTN_MINUS_X + LIQ_BTN_W and by <= y <= by + LIQ_BTN_H:
-        liquify_radius = max(20, liquify_radius - 10);  return
-    if LIQ_BTN_PLUS_X <= x <= LIQ_BTN_PLUS_X + LIQ_BTN_W and by <= y <= by + LIQ_BTN_H:
-        liquify_radius = min(150, liquify_radius + 10);  return
-    if LIQ_CLEAR_X <= x <= LIQ_CLEAR_X + LIQ_CLEAR_W and by <= y <= by + LIQ_BTN_H:
-        liquify.clear_anchors();  return
-    if LIQ_UNDO_X <= x <= LIQ_UNDO_X + LIQ_BTN_W + 10 and by <= y <= by + LIQ_BTN_H:
-        liquify.undo_anchor();  return
+def _handle_edit_click(x, y, panel_y):
+    global edit_size, edit_mode
+    sub_y  = panel_y + EDIT_SUBMODE_Y
+    ctrl_y = panel_y + EDIT_H // 2
+
+    # Sub-mode toggle buttons
+    if EDIT_SUB1_X <= x <= EDIT_SUB1_X + EDIT_SUB_W and sub_y <= y <= sub_y + EDIT_SUB_H:
+        edit_mode = "liquify";  return
+    if EDIT_SUB2_X <= x <= EDIT_SUB2_X + EDIT_SUB_W and sub_y <= y <= sub_y + EDIT_SUB_H:
+        edit_mode = "spotheal";  return
+
+    by = ctrl_y - EDIT_BTN_H // 2
+    if EDIT_BTN_MINUS_X <= x <= EDIT_BTN_MINUS_X + EDIT_BTN_W and by <= y <= by + EDIT_BTN_H:
+        edit_size = max(8, edit_size - 5);  return
+    if EDIT_BTN_PLUS_X <= x <= EDIT_BTN_PLUS_X + EDIT_BTN_W and by <= y <= by + EDIT_BTN_H:
+        edit_size = min(120, edit_size + 5);  return
+    if EDIT_CLEAR_X <= x <= EDIT_CLEAR_X + EDIT_CLEAR_W and by <= y <= by + EDIT_BTN_H:
+        liquify.clear_anchors()
+        spotHeal.clear_spots()
+        return
+    if EDIT_UNDO_X <= x <= EDIT_UNDO_X + EDIT_UNDO_W and by <= y <= by + EDIT_BTN_H:
+        if edit_mode == "liquify":
+            liquify.undo_anchor()
+        else:
+            spotHeal.undo_spot()
+        return
 
 # ---------------------------------------------------------------------------
 # Drawing
 # ---------------------------------------------------------------------------
 def draw_buttons(canvas):
+    edit_label = "Edit: ON" if edit_on else "Edit: OFF"
     for bx, label, active in [
         (BTN1_X, "Beauty: ON"   if beauty_on  else "Beauty: OFF",   beauty_on),
         (BTN2_X, "Cat Ears: ON" if overlay_on else "Cat Ears: OFF",  overlay_on),
         (BTN3_X, "Makeup: ON"   if makeup_on  else "Makeup: OFF",   makeup_on),
-        (BTN4_X, "Liquify: ON"  if liquify_on else "Liquify: OFF",  liquify_on),
+        (BTN4_X, edit_label,                                         edit_on),
     ]:
         color = (60, 160, 60) if active else (60, 60, 60)
         cv2.rectangle(canvas, (bx, BTN_Y), (bx + BTN_W, BTN_Y + BTN_H), color, -1)
@@ -245,42 +274,58 @@ def draw_makeup_controls(canvas):
         cv2.rectangle(canvas, (OP_BTN2_X, by), (OP_BTN2_X + OP_BTN_W, by + OP_BTN_H), (70, 70, 70), -1)
         cv2.putText(canvas, "+", (OP_BTN2_X + 6, by + 16), font, 0.55, (255, 255, 255), 1)
 
-def draw_liquify_controls(canvas):
-    panel_y = _liquify_panel_y()
-    cv2.rectangle(canvas, (0, panel_y), (CANVAS_W, panel_y + LIQUIFY_H), (18, 18, 28), -1)
+def draw_edit_controls(canvas):
+    panel_y = _edit_panel_y()
+    cv2.rectangle(canvas, (0, panel_y), (CANVAS_W, panel_y + EDIT_H), (18, 18, 28), -1)
     cv2.line(canvas, (0, panel_y), (CANVAS_W, panel_y), (60, 60, 60), 1)
     font = cv2.FONT_HERSHEY_SIMPLEX
-    row_y = panel_y + LIQUIFY_H // 2
-    by = row_y - LIQ_BTN_H // 2
 
-    # Radius control
-    cv2.putText(canvas, f"Brush Size: {liquify_radius}", (LIQ_BRUSH_LABEL_X, row_y + 6),
+    # Sub-mode buttons
+    sub_y = panel_y + EDIT_SUBMODE_Y
+    for sx, label, active in [
+        (EDIT_SUB1_X, "Liquify",   edit_mode == "liquify"),
+        (EDIT_SUB2_X, "Spot Heal", edit_mode == "spotheal"),
+    ]:
+        color = (80, 100, 160) if active else (50, 50, 50)
+        cv2.rectangle(canvas, (sx, sub_y), (sx + EDIT_SUB_W, sub_y + EDIT_SUB_H), color, -1)
+        cv2.rectangle(canvas, (sx, sub_y), (sx + EDIT_SUB_W, sub_y + EDIT_SUB_H), (150, 150, 150), 1)
+        (tw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+        lx = sx + (EDIT_SUB_W - tw) // 2
+        cv2.putText(canvas, label, (lx, sub_y + 17), font, 0.38, (255, 255, 255), 1)
+
+    # Size control + action buttons on center row
+    ctrl_y = panel_y + EDIT_H // 2 + 10
+    by = ctrl_y - EDIT_BTN_H // 2
+
+    cv2.putText(canvas, f"Size: {edit_size}", (EDIT_SIZE_LABEL_X, ctrl_y + 5),
                 font, 0.45, (180, 180, 180), 1)
-    cv2.rectangle(canvas, (LIQ_BTN_MINUS_X, by), (LIQ_BTN_MINUS_X + LIQ_BTN_W, by + LIQ_BTN_H), (70, 70, 70), -1)
-    cv2.putText(canvas, "-", (LIQ_BTN_MINUS_X + 8, by + 18), font, 0.55, (255, 255, 255), 1)
-    cv2.rectangle(canvas, (LIQ_BTN_PLUS_X, by), (LIQ_BTN_PLUS_X + LIQ_BTN_W, by + LIQ_BTN_H), (70, 70, 70), -1)
-    cv2.putText(canvas, "+", (LIQ_BTN_PLUS_X + 6, by + 18), font, 0.55, (255, 255, 255), 1)
 
-    # Clear button
-    cv2.rectangle(canvas, (LIQ_CLEAR_X, by), (LIQ_CLEAR_X + LIQ_CLEAR_W, by + LIQ_BTN_H), (80, 50, 50), -1)
-    cv2.putText(canvas, "Clear", (LIQ_CLEAR_X + 8, by + 18), font, 0.45, (255, 255, 255), 1)
+    cv2.rectangle(canvas, (EDIT_BTN_MINUS_X, by), (EDIT_BTN_MINUS_X + EDIT_BTN_W, by + EDIT_BTN_H), (70, 70, 70), -1)
+    cv2.putText(canvas, "-", (EDIT_BTN_MINUS_X + 8, by + 18), font, 0.55, (255, 255, 255), 1)
+    cv2.rectangle(canvas, (EDIT_BTN_PLUS_X, by), (EDIT_BTN_PLUS_X + EDIT_BTN_W, by + EDIT_BTN_H), (70, 70, 70), -1)
+    cv2.putText(canvas, "+", (EDIT_BTN_PLUS_X + 6, by + 18), font, 0.55, (255, 255, 255), 1)
 
-    #Undo button
-    cv2.rectangle(canvas, (LIQ_UNDO_X, by), (LIQ_UNDO_X + 50, by + LIQ_BTN_H), (50, 70, 80), -1)
-    cv2.putText(canvas, "Undo", (LIQ_UNDO_X + 8, by + 18), font, 0.45, (255, 255, 255), 1)
+    cv2.rectangle(canvas, (EDIT_CLEAR_X, by), (EDIT_CLEAR_X + EDIT_CLEAR_W, by + EDIT_BTN_H), (80, 50, 50), -1)
+    cv2.putText(canvas, "Clear", (EDIT_CLEAR_X + 6, by + 18), font, 0.42, (255, 255, 255), 1)
 
-    # Anchor count + hint
-    count = liquify.get_anchor_count()
-    hint = f"{count} warp{'s' if count != 1 else ''} active  |  drag on face to warp"
-    cv2.putText(canvas, hint, (445, row_y + 6), font, 0.38, (120, 120, 120), 1)
+    cv2.rectangle(canvas, (EDIT_UNDO_X, by), (EDIT_UNDO_X + EDIT_UNDO_W, by + EDIT_BTN_H), (50, 70, 80), -1)
+    cv2.putText(canvas, "Undo", (EDIT_UNDO_X + 6, by + 18), font, 0.42, (255, 255, 255), 1)
 
-    # Draw drag preview circle on camera area
-    if _drag_start is not None:
+    # Hint
+    if edit_mode == "liquify":
+        count = liquify.get_anchor_count()
+        hint  = f"{count} warp{'s' if count != 1 else ''} active  |  drag on face to warp"
+    else:
+        count = spotHeal.get_spot_count()
+        hint  = f"{count} spot{'s' if count != 1 else ''} healed  |  click on spot to heal"
+    cv2.putText(canvas, hint, (EDIT_HINT_X, ctrl_y + 5), font, 0.36, (120, 120, 120), 1)
+
+    # Drag preview for liquify
+    if edit_mode == "liquify" and _drag_start is not None:
         cv2.circle(canvas, _drag_start, 6, (100, 200, 100), 1)
-        #cv2.circle(canvas, _drag_start, liquify_radius, (100, 200, 100), 1)
 
 def draw_canvas(main_frame, thumbs, filter_list):
-    total_h = CANVAS_H + (MAKEUP_H if makeup_on else 0) + (LIQUIFY_H if liquify_on else 0)
+    total_h = CANVAS_H + (MAKEUP_H if makeup_on else 0) + (EDIT_H if edit_on else 0)
     canvas = np.zeros((total_h, CANVAS_W, 3), dtype=np.uint8)
     canvas[MAIN_H:CANVAS_H, :] = (28, 28, 28)
 
@@ -297,8 +342,8 @@ def draw_canvas(main_frame, thumbs, filter_list):
         if thumbs[i] is not None:
             canvas[THUMB_Y:THUMB_Y + THUMB_H, tx:tx + THUMB_W] = thumbs[i]
         border_color = (255, 255, 255) if i == selected else (90, 90, 90)
-        border_t     = 3 if i == selected else 1
-        pad          = 3 if i == selected else 1
+        border_t = 3 if i == selected else 1
+        pad      = 3 if i == selected else 1
         cv2.rectangle(canvas, (tx - pad, THUMB_Y - pad),
                       (tx + THUMB_W + pad - 1, THUMB_Y + THUMB_H + pad - 1), border_color, border_t)
         (tw, _), _ = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
@@ -308,8 +353,8 @@ def draw_canvas(main_frame, thumbs, filter_list):
 
     if makeup_on:
         draw_makeup_controls(canvas)
-    if liquify_on:
-        draw_liquify_controls(canvas)
+    if edit_on:
+        draw_edit_controls(canvas)
 
     return canvas, ox, oy
 
@@ -325,13 +370,12 @@ def apply_filters(frame, filter_list):
         output = beauty_apply(output)
 
     landmarks = None
-    if overlay_on or makeup_on or liquify_on:
+    if overlay_on or makeup_on or edit_on:
         if beauty_on:
             landmarks = get_last_landmarks()
         else:
             landmarks, _ = get_landmarks_and_bbox(output)
 
-    # Always keep a fresh copy for liquify mouse callback
     if landmarks is not None:
         _current_landmarks = landmarks
 
@@ -343,8 +387,9 @@ def apply_filters(frame, filter_list):
         output = makeup_apply(output, landmarks,
                               blush_hue, makeup_state["blush_op"],
                               lip_hue,   makeup_state["lip_op"])
-    if liquify_on:
+    if edit_on:
         output = liquify.apply(output, landmarks)
+        output = spotHeal.apply(output, landmarks)
 
     return output
 
@@ -360,12 +405,12 @@ def main():
         return
 
     print("Photo Booth running.")
-    print("  Toggle buttons | drag face to liquify | s = save | r = reload | q = quit")
+    print("  Toggle buttons | s = save | r = reload | q = quit")
 
     cv2.namedWindow("Photo Booth")
     cv2.setMouseCallback("Photo Booth", mouse_callback)
 
-    thumbs     = [None] * 5
+    thumbs      = [None] * 5
     frame_count = 0
 
     while True:
@@ -376,11 +421,10 @@ def main():
         filter_list = get_filter_list()
 
         fh, fw = frame.shape[:2]
-        scale     = min(CANVAS_W / fw, MAIN_H / fh)
-        main_size = (int(fw * scale), int(fh * scale))
+        scale      = min(CANVAS_W / fw, MAIN_H / fh)
+        main_size  = (int(fw * scale), int(fh * scale))
         main_frame = cv2.resize(frame, main_size)
 
-        # Store frame offset so mouse_callback can convert coords
         _frame_ox = (CANVAS_W - main_size[0]) // 2
         _frame_oy = (MAIN_H   - main_size[1]) // 2
 

@@ -28,8 +28,8 @@ def add_anchor(landmarks, frame_x, frame_y, warp_dx, warp_dy, radius):
         "lm_idx":   nearest_idx,
         "offset_x": frame_x - lm[0],
         "offset_y": frame_y - lm[1],
-        "warp_dx":  float(warp_dx) * 0.08,
-        "warp_dy":  float(warp_dy) * 0.08,
+        "warp_dx":  float(warp_dx) * 0.065,
+        "warp_dy":  float(warp_dy) * 0.065,
         "radius":   float(radius),
     })
 
