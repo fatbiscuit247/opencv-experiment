@@ -11,7 +11,7 @@ import filters.liquify as liquify
 # ---------------------------------------------------------------------------
 # Layout constants
 # ---------------------------------------------------------------------------
-CANVAS_W      = 700
+CANVAS_W      = 780
 MAIN_H        = 480
 STRIP_H       = 150
 CANVAS_H      = MAIN_H + STRIP_H
@@ -44,9 +44,9 @@ SWATCH_GAP     = 28
 SWATCH_START_X = 90
 BLUSH_ROW_Y    = CANVAS_H + 22
 LIP_ROW_Y      = CANVAS_H + 62
-OP_LABEL_X     = 440
-OP_BTN_X       = 510
-OP_BTN2_X      = 548
+OP_LABEL_X  = 480
+OP_BTN_X    = 570
+OP_BTN2_X   = 605
 OP_BTN_W       = 28
 OP_BTN_H       = 22
 
@@ -74,8 +74,8 @@ _current_landmarks = None
 makeup_state = {
     "blush_idx": 0,
     "lip_idx":   0,
-    "blush_op":  40,
-    "lip_op":    60,
+    "blush_op":  0,
+    "lip_op":    0,
 }
 
 # Drag state for liquify
@@ -276,7 +276,8 @@ def draw_liquify_controls(canvas):
 
     # Draw drag preview circle on camera area
     if _drag_start is not None:
-        cv2.circle(canvas, _drag_start, liquify_radius, (100, 200, 100), 1)
+        cv2.circle(canvas, _drag_start, 6, (100, 200, 100), 1)
+        #cv2.circle(canvas, _drag_start, liquify_radius, (100, 200, 100), 1)
 
 def draw_canvas(main_frame, thumbs, filter_list):
     total_h = CANVAS_H + (MAKEUP_H if makeup_on else 0) + (LIQUIFY_H if liquify_on else 0)
