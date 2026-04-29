@@ -63,10 +63,10 @@ EDIT_BTN_PLUS_X   = 345
 EDIT_BTN_W        = 28
 EDIT_BTN_H        = 26
 EDIT_CLEAR_X      = 385
-EDIT_CLEAR_W      = 55
-EDIT_UNDO_X       = 448
+EDIT_CLEAR_W      = 70
+EDIT_UNDO_X       = 465
 EDIT_UNDO_W       = 50
-EDIT_HINT_X       = 510
+EDIT_HINT_X       = 525
 
 # ---------------------------------------------------------------------------
 # State
@@ -218,7 +218,7 @@ def _handle_edit_click(x, y, panel_y):
 
     by = ctrl_y - EDIT_BTN_H // 2
     if EDIT_BTN_MINUS_X <= x <= EDIT_BTN_MINUS_X + EDIT_BTN_W and by <= y <= by + EDIT_BTN_H:
-        edit_size = max(8, edit_size - 5);  return
+        edit_size = max(0, edit_size - 5);  return
     if EDIT_BTN_PLUS_X <= x <= EDIT_BTN_PLUS_X + EDIT_BTN_W and by <= y <= by + EDIT_BTN_H:
         edit_size = min(120, edit_size + 5);  return
     if EDIT_CLEAR_X <= x <= EDIT_CLEAR_X + EDIT_CLEAR_W and by <= y <= by + EDIT_BTN_H:
@@ -306,7 +306,7 @@ def draw_edit_controls(canvas):
     cv2.putText(canvas, "+", (EDIT_BTN_PLUS_X + 6, by + 18), font, 0.55, (255, 255, 255), 1)
 
     cv2.rectangle(canvas, (EDIT_CLEAR_X, by), (EDIT_CLEAR_X + EDIT_CLEAR_W, by + EDIT_BTN_H), (80, 50, 50), -1)
-    cv2.putText(canvas, "Clear", (EDIT_CLEAR_X + 6, by + 18), font, 0.42, (255, 255, 255), 1)
+    cv2.putText(canvas, "Clear", (EDIT_CLEAR_X + 14, by + 18), font, 0.42, (255, 255, 255), 1)
 
     cv2.rectangle(canvas, (EDIT_UNDO_X, by), (EDIT_UNDO_X + EDIT_UNDO_W, by + EDIT_BTN_H), (50, 70, 80), -1)
     cv2.putText(canvas, "Undo", (EDIT_UNDO_X + 6, by + 18), font, 0.42, (255, 255, 255), 1)
