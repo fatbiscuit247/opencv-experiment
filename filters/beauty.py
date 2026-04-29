@@ -188,7 +188,11 @@ def apply(frame):
     mask_3ch = cv2.merge([mask, mask, mask]).astype(np.float32) / 255.0
     output = (frame.astype(np.float32) * (1 - mask_3ch) +
               smoothed.astype(np.float32) * mask_3ch).astype(np.uint8)
-    output = slim_face(output, landmarks)
+    #output = slim_face(output, landmarks) 
 
     _last_output = output
     return output
+
+def get_last_landmarks():
+    """Return the most recently cached landmarks for use by overlays."""
+    return _cached_landmarks
