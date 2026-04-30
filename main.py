@@ -8,6 +8,8 @@ from filters.overlays import apply_cat_ears
 from filters.makeup   import apply as makeup_apply
 import filters.liquify  as liquify
 import filters.spotHeal as spotHeal
+import filters.symmetry as symmetry
+
 
 # ---------------------------------------------------------------------------
 # Layout constants
@@ -26,11 +28,12 @@ THUMB_Y       = MAIN_H + 60
 BTN_W, BTN_H  = 118, 30
 BTN_GAP       = 7
 BTN_Y         = MAIN_H + 12
-_NUM_BTNS     = 4
+_NUM_BTNS     = 5
 BTN1_X        = (CANVAS_W - BTN_W * _NUM_BTNS - BTN_GAP * (_NUM_BTNS - 1)) // 2
 BTN2_X        = BTN1_X + BTN_W + BTN_GAP
 BTN3_X        = BTN2_X + BTN_W + BTN_GAP
 BTN4_X        = BTN3_X + BTN_W + BTN_GAP
+BTN5_X = BTN4_X + BTN_W + BTN_GAP
 
 THUMB_UPDATE_EVERY = 15
 
@@ -69,6 +72,15 @@ EDIT_UNDO_W       = 50
 EDIT_HINT_X       = 525
 
 # ---------------------------------------------------------------------------
+# Symmetry (If Dark)
+# ---------------------------------------------------------------------------
+
+DARK_BTN_W = 80
+DARK_BTN_H = 22
+DARK_BTN_X = BTN5_X + BTN_W - BTN_GAP
+DARK_BTN_Y = BTN_Y + BTN_H - 6
+
+# ---------------------------------------------------------------------------
 # State
 # ---------------------------------------------------------------------------
 selected      = 0
@@ -76,6 +88,7 @@ beauty_on     = False
 overlay_on    = False
 makeup_on     = False
 edit_on       = False
+symmetry_on = False
 edit_mode     = "liquify"   # "liquify" or "spotheal"
 edit_size     = 20
 
@@ -129,7 +142,7 @@ def _edit_panel_y():
 # Mouse callback
 # ---------------------------------------------------------------------------
 def mouse_callback(event, x, y, flags, param):
-    global selected, beauty_on, overlay_on, makeup_on, edit_on
+    global selected, beauty_on, overlay_on, makeup_on, edit_on, symmetry_on
     global _drag_start, edit_size, edit_mode
 
     # ---- Edit interactions inside camera area ----
@@ -166,6 +179,10 @@ def mouse_callback(event, x, y, flags, param):
         makeup_on = not makeup_on;  return
     if BTN4_X <= x <= BTN4_X + BTN_W and BTN_Y <= y <= BTN_Y + BTN_H:
         edit_on = not edit_on;  return
+    if BTN5_X <= x <= BTN5_X + BTN_W and BTN_Y <= y <= BTN_Y + BTN_H:
+        symmetry_on = not symmetry_on;  return
+    if symmetry_on and DARK_BTN_X <= x <= DARK_BTN_X + DARK_BTN_W and DARK_BTN_Y <= y <= DARK_BTN_Y + DARK_BTN_H:
+        symmetry.toggle_dark_mode();  return
 
     # ---- Filter thumbnails ----
     filter_list = get_filter_list()
@@ -242,6 +259,7 @@ def draw_buttons(canvas):
         (BTN2_X, "Cat Ears: ON" if overlay_on else "Cat Ears: OFF",  overlay_on),
         (BTN3_X, "Makeup: ON"   if makeup_on  else "Makeup: OFF",   makeup_on),
         (BTN4_X, edit_label,                                         edit_on),
+        (BTN5_X, "Symmetry: ON" if symmetry_on else "Symmetry: OFF", symmetry_on),
     ]:
         color = (60, 160, 60) if active else (60, 60, 60)
         cv2.rectangle(canvas, (bx, BTN_Y), (bx + BTN_W, BTN_Y + BTN_H), color, -1)
@@ -250,6 +268,18 @@ def draw_buttons(canvas):
         lx = bx + (BTN_W - tw) // 2
         cv2.putText(canvas, label, (lx, BTN_Y + 21),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
+        
+    if symmetry_on:
+        label = "Dark: ON" if symmetry.dark_mode else "Dark: OFF"
+        color = (60, 160, 60) if symmetry.dark_mode else (60, 60, 60)
+        cv2.rectangle(canvas, (DARK_BTN_X, DARK_BTN_Y),
+                      (DARK_BTN_X + DARK_BTN_W, DARK_BTN_Y + DARK_BTN_H), color, -1)
+        cv2.rectangle(canvas, (DARK_BTN_X, DARK_BTN_Y),
+                      (DARK_BTN_X + DARK_BTN_W, DARK_BTN_Y + DARK_BTN_H), (200, 200, 200), 1)
+        (tw, _), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+        lx = DARK_BTN_X + (DARK_BTN_W - tw) // 2
+        cv2.putText(canvas, label, (lx, DARK_BTN_Y + 15),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1)
 
 def draw_makeup_controls(canvas):
     panel_y = CANVAS_H
@@ -390,6 +420,12 @@ def apply_filters(frame, filter_list):
     if edit_on:
         output = liquify.apply(output, landmarks)
         output = spotHeal.apply(output, landmarks)
+
+    if symmetry_on:
+        if landmarks is None:
+            landmarks, _ = get_landmarks_and_bbox(output)
+        if landmarks is not None:
+            output = symmetry.draw(output, landmarks)
 
     return output
 
