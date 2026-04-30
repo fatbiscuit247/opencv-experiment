@@ -2,6 +2,8 @@ import cv2
 cv2.ocl.setUseOpenCL(True)
 import numpy as np
 import sys
+import os                       # PHASE 3
+import datetime                 # PHASE 3
 import filters
 from filters.beauty   import apply as beauty_apply, get_last_landmarks, get_landmarks_and_bbox
 from filters.overlays import apply_cat_ears
@@ -23,7 +25,7 @@ EDIT_H        = 80
 THUMB_W       = 96
 THUMB_H       = 72
 THUMB_PADDING = 10
-THUMB_Y       = MAIN_H + 60
+THUMB_Y       = MAIN_H + 76
 
 BTN_W, BTN_H  = 118, 30
 BTN_GAP       = 7
@@ -33,7 +35,7 @@ BTN1_X        = (CANVAS_W - BTN_W * _NUM_BTNS - BTN_GAP * (_NUM_BTNS - 1)) // 2
 BTN2_X        = BTN1_X + BTN_W + BTN_GAP
 BTN3_X        = BTN2_X + BTN_W + BTN_GAP
 BTN4_X        = BTN3_X + BTN_W + BTN_GAP
-BTN5_X = BTN4_X + BTN_W + BTN_GAP
+BTN5_X        = BTN4_X + BTN_W + BTN_GAP
 
 THUMB_UPDATE_EVERY = 15
 
@@ -55,7 +57,7 @@ OP_BTN_W       = 28
 OP_BTN_H       = 22
 
 # Edit panel constants
-EDIT_SUBMODE_Y    = 18    # y offset within panel for sub-mode buttons
+EDIT_SUBMODE_Y    = 18
 EDIT_SUB_W        = 90
 EDIT_SUB_H        = 26
 EDIT_SUB1_X       = 10
@@ -71,14 +73,28 @@ EDIT_UNDO_X       = 465
 EDIT_UNDO_W       = 50
 EDIT_HINT_X       = 525
 
-# ---------------------------------------------------------------------------
-# Symmetry (If Dark)
-# ---------------------------------------------------------------------------
-
+# Symmetry dark toggle
 DARK_BTN_W = 80
 DARK_BTN_H = 22
 DARK_BTN_X = BTN5_X + BTN_W - BTN_GAP
 DARK_BTN_Y = BTN_Y + BTN_H - 6
+
+# ---------------------------------------------------------------------------
+# PHASE 3 — Full-width tab bar in the 18px gap between buttons and thumbs
+# BTN_Y + BTN_H = 522,  THUMB_Y = 540  →  18px of free space
+# ---------------------------------------------------------------------------
+TABBAR_Y = BTN_Y + BTN_H + 1          # = 523
+TABBAR_H = THUMB_Y - TABBAR_Y - 2     # = 15
+TAB_MID  = CANVAS_W // 2              # = 390  (divides Filters | Snaps)
+
+# ---------------------------------------------------------------------------
+# PHASE 3 — Snapshot storage
+# ---------------------------------------------------------------------------
+SNAPSHOT_DIR = "snapshots"
+os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+
+session_snapshots = []   # list of {"path": str, "thumb": ndarray, "ts": str}
+snap_scroll       = 0    # index of first visible snapshot in strip
 
 # ---------------------------------------------------------------------------
 # State
@@ -88,8 +104,9 @@ beauty_on     = False
 overlay_on    = False
 makeup_on     = False
 edit_on       = False
-symmetry_on = False
-edit_mode     = "liquify"   # "liquify" or "spotheal"
+symmetry_on   = False
+strip_mode    = "filters"   # PHASE 3: "filters" | "snapshots"
+edit_mode     = "liquify"
 edit_size     = 20
 
 _current_landmarks = None
@@ -139,13 +156,93 @@ def _edit_panel_y():
     return CANVAS_H + (MAKEUP_H if makeup_on else 0)
 
 # ---------------------------------------------------------------------------
+# PHASE 3 — Snapshot helpers
+# ---------------------------------------------------------------------------
+def _make_thumb(frame: np.ndarray) -> np.ndarray:
+    """Centre-crop resize to THUMB_W x THUMB_H."""
+    fh, fw = frame.shape[:2]
+    scale  = max(THUMB_W / fw, THUMB_H / fh)
+    res    = cv2.resize(frame, (int(fw * scale), int(fh * scale)))
+    rh, rw = res.shape[:2]
+    x0 = (rw - THUMB_W) // 2
+    y0 = (rh - THUMB_H) // 2
+    return res[y0:y0 + THUMB_H, x0:x0 + THUMB_W].copy()
+
+def save_snapshot(frame: np.ndarray) -> None:
+    """Save current frame to snapshots/, add to session list, auto-switch to Snaps tab."""
+    global strip_mode
+    ts   = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    path = os.path.join(SNAPSHOT_DIR, f"{ts}.jpg")
+    if cv2.imwrite(path, frame):
+        session_snapshots.append({"path": path, "thumb": _make_thumb(frame), "ts": ts})
+        strip_mode = "snapshots"   # show the user their new snap immediately
+        print(f"  Snapshot saved -> {path}  ({len(session_snapshots)} this session)")
+    else:
+        print("  ERROR: snapshot write failed")
+
+def show_snapshot_preview(snap: dict, win_h: int) -> bool:
+    """
+    Fullscreen preview drawn WITHIN the Photo Booth window — no new window.
+    Returns True if the user pressed D (delete), False for any other key.
+    """
+    overlay = np.full((win_h, CANVAS_W, 3), 15, dtype=np.uint8)
+
+    img = cv2.imread(snap["path"])
+    if img is not None:
+        fh, fw = img.shape[:2]
+        scale  = min((CANVAS_W - 40) / fw, (win_h - 72) / fh)
+        disp   = cv2.resize(img, (int(fw * scale), int(fh * scale)))
+        dh, dw = disp.shape[:2]
+        y0 = (win_h - dh) // 2
+        x0 = (CANVAS_W - dw) // 2
+        overlay[y0:y0 + dh, x0:x0 + dw] = disp
+
+    # Bottom bar
+    cv2.rectangle(overlay, (0, win_h - 30), (CANVAS_W, win_h), (25, 25, 25), -1)
+
+    cv2.putText(overlay, snap["ts"],
+                (10, win_h - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.42, (160, 160, 160), 1, cv2.LINE_AA)
+
+    # Delete button visual (right side of bottom bar)
+    del_x = CANVAS_W - 110
+    cv2.rectangle(overlay, (del_x, win_h - 26), (del_x + 100, win_h - 4), (80, 40, 40), -1)
+    cv2.rectangle(overlay, (del_x, win_h - 26), (del_x + 100, win_h - 4), (160, 80, 80), 1)
+    cv2.putText(overlay, "D  Delete", (del_x + 8, win_h - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, (220, 140, 140), 1, cv2.LINE_AA)
+
+    cv2.putText(overlay, "any other key to close",
+                (del_x - 190, win_h - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.36, (80, 80, 80), 1, cv2.LINE_AA)
+
+    cv2.imshow("Photo Booth", overlay)
+    key = cv2.waitKey(0) & 0xFF
+    return key == ord('d')
+
+def _snap_max_visible() -> int:
+    return (CANVAS_W - 20) // (THUMB_W + THUMB_PADDING)
+
+def _snap_hit(x: int, y: int) -> int:
+    """Return session_snapshots index if (x, y) hits a thumbnail, else -1."""
+    if not (THUMB_Y <= y <= THUMB_Y + THUMB_H):
+        return -1
+    max_vis = _snap_max_visible()
+    for slot in range(max_vis):
+        tx = 10 + slot * (THUMB_W + THUMB_PADDING)
+        if tx <= x <= tx + THUMB_W:
+            idx = snap_scroll + slot
+            if idx < len(session_snapshots):
+                return idx
+    return -1
+
+# ---------------------------------------------------------------------------
 # Mouse callback
 # ---------------------------------------------------------------------------
 def mouse_callback(event, x, y, flags, param):
     global selected, beauty_on, overlay_on, makeup_on, edit_on, symmetry_on
-    global _drag_start, edit_size, edit_mode
+    global _drag_start, edit_size, edit_mode, strip_mode, snap_scroll
 
-    # ---- Edit interactions inside camera area ----
+    # ---- Edit drag interactions inside camera area ----
     if edit_on and y < MAIN_H:
         if edit_mode == "liquify":
             if event == cv2.EVENT_LBUTTONDOWN:
@@ -170,7 +267,28 @@ def mouse_callback(event, x, y, flags, param):
     if event != cv2.EVENT_LBUTTONDOWN:
         return
 
-    # ---- Toggle buttons ----
+    # ---- PHASE 3: Full-width tab bar hit detection ----
+    if TABBAR_Y <= y <= TABBAR_Y + TABBAR_H:
+        strip_mode = "snapshots" if x >= TAB_MID else "filters"
+        return
+
+    # ---- PHASE 3: Snapshot thumb click -> preview (with possible delete) ----
+    if strip_mode == "snapshots":
+        idx = _snap_hit(x, y)
+        if idx >= 0:
+            total_h = CANVAS_H + (MAKEUP_H if makeup_on else 0) + (EDIT_H if edit_on else 0)
+            deleted = show_snapshot_preview(session_snapshots[idx], total_h)
+            if deleted:
+                try:
+                    os.remove(session_snapshots[idx]["path"])
+                except OSError:
+                    pass
+                session_snapshots.pop(idx)
+                if snap_scroll > 0 and snap_scroll >= len(session_snapshots):
+                    snap_scroll -= 1
+            return
+
+    # ---- Feature toggle buttons ----
     if BTN1_X <= x <= BTN1_X + BTN_W and BTN_Y <= y <= BTN_Y + BTN_H:
         beauty_on = not beauty_on;  return
     if BTN2_X <= x <= BTN2_X + BTN_W and BTN_Y <= y <= BTN_Y + BTN_H:
@@ -184,13 +302,14 @@ def mouse_callback(event, x, y, flags, param):
     if symmetry_on and DARK_BTN_X <= x <= DARK_BTN_X + DARK_BTN_W and DARK_BTN_Y <= y <= DARK_BTN_Y + DARK_BTN_H:
         symmetry.toggle_dark_mode();  return
 
-    # ---- Filter thumbnails ----
-    filter_list = get_filter_list()
-    if THUMB_Y <= y <= THUMB_Y + THUMB_H:
-        for i in range(len(filter_list)):
-            tx = get_thumb_x(i, len(filter_list))
-            if tx <= x <= tx + THUMB_W:
-                selected = i;  return
+    # ---- Filter thumbnails (only in Filters tab) ----
+    if strip_mode == "filters":
+        filter_list = get_filter_list()
+        if THUMB_Y <= y <= THUMB_Y + THUMB_H:
+            for i in range(len(filter_list)):
+                tx = get_thumb_x(i, len(filter_list))
+                if tx <= x <= tx + THUMB_W:
+                    selected = i;  return
 
     # ---- Makeup controls ----
     if makeup_on and CANVAS_H <= y <= CANVAS_H + MAKEUP_H:
@@ -227,7 +346,6 @@ def _handle_edit_click(x, y, panel_y):
     sub_y  = panel_y + EDIT_SUBMODE_Y
     ctrl_y = panel_y + EDIT_H // 2
 
-    # Sub-mode toggle buttons
     if EDIT_SUB1_X <= x <= EDIT_SUB1_X + EDIT_SUB_W and sub_y <= y <= sub_y + EDIT_SUB_H:
         edit_mode = "liquify";  return
     if EDIT_SUB2_X <= x <= EDIT_SUB2_X + EDIT_SUB_W and sub_y <= y <= sub_y + EDIT_SUB_H:
@@ -252,14 +370,43 @@ def _handle_edit_click(x, y, panel_y):
 # ---------------------------------------------------------------------------
 # Drawing
 # ---------------------------------------------------------------------------
+def draw_tab_bar(canvas):
+    """Full-width tab bar in the gap between the button row and the thumb row."""
+    mid = TAB_MID
+    for is_snaps, mode, label in [
+        (False, "filters",   "Filters"),
+        (True,  "snapshots", "Snapshots"),
+    ]:
+        x0     = mid if is_snaps else 0
+        x1     = CANVAS_W if is_snaps else mid
+        active = (strip_mode == mode)
+        bg     = (45, 80, 45) if active else (20, 20, 20)
+        cv2.rectangle(canvas, (x0, TABBAR_Y), (x1, TABBAR_Y + TABBAR_H), bg, -1)
+
+        suffix     = f" ({len(session_snapshots)})" if mode == "snapshots" and session_snapshots else ""
+        full_label = label + suffix
+        (tw, _), _ = cv2.getTextSize(full_label, cv2.FONT_HERSHEY_SIMPLEX, 0.34, 1)
+        lx = x0 + ((x1 - x0) - tw) // 2
+        ly = TABBAR_Y + TABBAR_H // 2 + 5
+        col = (220, 220, 220) if active else (90, 90, 90)
+        cv2.putText(canvas, full_label, (lx, ly),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.34, col, 1, cv2.LINE_AA)
+
+    # Centre divider + top/bottom rule lines
+    cv2.line(canvas, (mid, TABBAR_Y), (mid, TABBAR_Y + TABBAR_H), (55, 55, 55), 1)
+    cv2.line(canvas, (0, TABBAR_Y), (CANVAS_W, TABBAR_Y), (45, 45, 45), 1)
+    cv2.line(canvas, (0, TABBAR_Y + TABBAR_H), (CANVAS_W, TABBAR_Y + TABBAR_H), (45, 45, 45), 1)
+
+
 def draw_buttons(canvas):
+    # ---- Feature toggle buttons ----
     edit_label = "Edit: ON" if edit_on else "Edit: OFF"
     for bx, label, active in [
-        (BTN1_X, "Beauty: ON"   if beauty_on  else "Beauty: OFF",   beauty_on),
-        (BTN2_X, "Cat Ears: ON" if overlay_on else "Cat Ears: OFF",  overlay_on),
-        (BTN3_X, "Makeup: ON"   if makeup_on  else "Makeup: OFF",   makeup_on),
-        (BTN4_X, edit_label,                                         edit_on),
-        (BTN5_X, "Symmetry: ON" if symmetry_on else "Symmetry: OFF", symmetry_on),
+        (BTN1_X, "Beauty: ON"    if beauty_on  else "Beauty: OFF",   beauty_on),
+        (BTN2_X, "Cat Ears: ON"  if overlay_on else "Cat Ears: OFF", overlay_on),
+        (BTN3_X, "Makeup: ON"    if makeup_on  else "Makeup: OFF",   makeup_on),
+        (BTN4_X, edit_label,                                          edit_on),
+        (BTN5_X, "Symmetry: ON"  if symmetry_on else "Symmetry: OFF",symmetry_on),
     ]:
         color = (60, 160, 60) if active else (60, 60, 60)
         cv2.rectangle(canvas, (bx, BTN_Y), (bx + BTN_W, BTN_Y + BTN_H), color, -1)
@@ -268,7 +415,7 @@ def draw_buttons(canvas):
         lx = bx + (BTN_W - tw) // 2
         cv2.putText(canvas, label, (lx, BTN_Y + 21),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1)
-        
+
     if symmetry_on:
         label = "Dark: ON" if symmetry.dark_mode else "Dark: OFF"
         color = (60, 160, 60) if symmetry.dark_mode else (60, 60, 60)
@@ -280,6 +427,53 @@ def draw_buttons(canvas):
         lx = DARK_BTN_X + (DARK_BTN_W - tw) // 2
         cv2.putText(canvas, label, (lx, DARK_BTN_Y + 15),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1)
+
+# PHASE 3 — snapshot strip (replaces filter thumbs when Snaps tab is active)
+def draw_snapshot_strip(canvas):
+    if not session_snapshots:
+        cv2.putText(canvas, "No snapshots yet  -  press  s  to save",
+                    (CANVAS_W // 2 - 165, THUMB_Y + THUMB_H // 2 + 5),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.44, (65, 65, 65), 1, cv2.LINE_AA)
+        return
+
+    max_vis = _snap_max_visible()
+    n       = len(session_snapshots)
+
+    for slot in range(max_vis):
+        idx = snap_scroll + slot
+        if idx >= n:
+            break
+        snap = session_snapshots[idx]
+        tx   = 10 + slot * (THUMB_W + THUMB_PADDING)
+        ty   = THUMB_Y
+
+        canvas[ty:ty + THUMB_H, tx:tx + THUMB_W] = snap["thumb"]
+        cv2.rectangle(canvas, (tx - 1, ty - 1), (tx + THUMB_W, ty + THUMB_H),
+                      (100, 100, 100), 1)
+
+        # Index badge top-left
+        cv2.putText(canvas, str(idx + 1), (tx + 3, ty + 13),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.33, (220, 220, 220), 1, cv2.LINE_AA)
+
+        # HH:MM:SS label below thumb
+        ts_short = snap["ts"][11:].replace("-", ":")
+        (tw_px, _), _ = cv2.getTextSize(ts_short, cv2.FONT_HERSHEY_SIMPLEX, 0.33, 1)
+        lx = tx + (THUMB_W - tw_px) // 2
+        cv2.putText(canvas, ts_short, (lx, THUMB_Y + THUMB_H + 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.33, (120, 120, 120), 1, cv2.LINE_AA)
+
+    # Scroll arrows
+    if snap_scroll > 0:
+        cv2.putText(canvas, "<", (2, THUMB_Y + THUMB_H // 2 + 7),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 150), 2, cv2.LINE_AA)
+    if snap_scroll + max_vis < n:
+        cv2.putText(canvas, ">", (CANVAS_W - 16, THUMB_Y + THUMB_H // 2 + 7),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (150, 150, 150), 2, cv2.LINE_AA)
+
+    # Count + click hint
+    hint = f"{n} snapshot{'s' if n != 1 else ''}  -  click to preview"
+    cv2.putText(canvas, hint, (CANVAS_W - 238, CANVAS_H - 6),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, (75, 75, 75), 1, cv2.LINE_AA)
 
 def draw_makeup_controls(canvas):
     panel_y = CANVAS_H
@@ -310,7 +504,6 @@ def draw_edit_controls(canvas):
     cv2.line(canvas, (0, panel_y), (CANVAS_W, panel_y), (60, 60, 60), 1)
     font = cv2.FONT_HERSHEY_SIMPLEX
 
-    # Sub-mode buttons
     sub_y = panel_y + EDIT_SUBMODE_Y
     for sx, label, active in [
         (EDIT_SUB1_X, "Liquify",   edit_mode == "liquify"),
@@ -323,25 +516,20 @@ def draw_edit_controls(canvas):
         lx = sx + (EDIT_SUB_W - tw) // 2
         cv2.putText(canvas, label, (lx, sub_y + 17), font, 0.38, (255, 255, 255), 1)
 
-    # Size control + action buttons on center row
     ctrl_y = panel_y + EDIT_H // 2 + 10
-    by = ctrl_y - EDIT_BTN_H // 2
+    by     = ctrl_y - EDIT_BTN_H // 2
 
     cv2.putText(canvas, f"Size: {edit_size}", (EDIT_SIZE_LABEL_X, ctrl_y + 5),
                 font, 0.45, (180, 180, 180), 1)
-
     cv2.rectangle(canvas, (EDIT_BTN_MINUS_X, by), (EDIT_BTN_MINUS_X + EDIT_BTN_W, by + EDIT_BTN_H), (70, 70, 70), -1)
     cv2.putText(canvas, "-", (EDIT_BTN_MINUS_X + 8, by + 18), font, 0.55, (255, 255, 255), 1)
     cv2.rectangle(canvas, (EDIT_BTN_PLUS_X, by), (EDIT_BTN_PLUS_X + EDIT_BTN_W, by + EDIT_BTN_H), (70, 70, 70), -1)
     cv2.putText(canvas, "+", (EDIT_BTN_PLUS_X + 6, by + 18), font, 0.55, (255, 255, 255), 1)
-
     cv2.rectangle(canvas, (EDIT_CLEAR_X, by), (EDIT_CLEAR_X + EDIT_CLEAR_W, by + EDIT_BTN_H), (80, 50, 50), -1)
     cv2.putText(canvas, "Clear", (EDIT_CLEAR_X + 14, by + 18), font, 0.42, (255, 255, 255), 1)
-
     cv2.rectangle(canvas, (EDIT_UNDO_X, by), (EDIT_UNDO_X + EDIT_UNDO_W, by + EDIT_BTN_H), (50, 70, 80), -1)
     cv2.putText(canvas, "Undo", (EDIT_UNDO_X + 6, by + 18), font, 0.42, (255, 255, 255), 1)
 
-    # Hint
     if edit_mode == "liquify":
         count = liquify.get_anchor_count()
         hint  = f"{count} warp{'s' if count != 1 else ''} active  |  drag on face to warp"
@@ -350,36 +538,40 @@ def draw_edit_controls(canvas):
         hint  = f"{count} spot{'s' if count != 1 else ''} healed  |  click on spot to heal"
     cv2.putText(canvas, hint, (EDIT_HINT_X, ctrl_y + 5), font, 0.36, (120, 120, 120), 1)
 
-    # Drag preview for liquify
     if edit_mode == "liquify" and _drag_start is not None:
         cv2.circle(canvas, _drag_start, 6, (100, 200, 100), 1)
 
 def draw_canvas(main_frame, thumbs, filter_list):
     total_h = CANVAS_H + (MAKEUP_H if makeup_on else 0) + (EDIT_H if edit_on else 0)
-    canvas = np.zeros((total_h, CANVAS_W, 3), dtype=np.uint8)
+    canvas  = np.zeros((total_h, CANVAS_W, 3), dtype=np.uint8)
     canvas[MAIN_H:CANVAS_H, :] = (28, 28, 28)
 
     fh, fw = main_frame.shape[:2]
     ox = (CANVAS_W - fw) // 2
-    oy = (MAIN_H - fh) // 2
+    oy = (MAIN_H  - fh) // 2
     canvas[oy:oy + fh, ox:ox + fw] = main_frame
 
     draw_buttons(canvas)
+    draw_tab_bar(canvas)   # PHASE 3: full-width tab bar between buttons and thumbs
 
-    n = len(filter_list)
-    for i, (name, _) in enumerate(filter_list):
-        tx = get_thumb_x(i, n)
-        if thumbs[i] is not None:
-            canvas[THUMB_Y:THUMB_Y + THUMB_H, tx:tx + THUMB_W] = thumbs[i]
-        border_color = (255, 255, 255) if i == selected else (90, 90, 90)
-        border_t = 3 if i == selected else 1
-        pad      = 3 if i == selected else 1
-        cv2.rectangle(canvas, (tx - pad, THUMB_Y - pad),
-                      (tx + THUMB_W + pad - 1, THUMB_Y + THUMB_H + pad - 1), border_color, border_t)
-        (tw, _), _ = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
-        lx = tx + (THUMB_W - tw) // 2
-        cv2.putText(canvas, name, (lx, THUMB_Y + THUMB_H + 16),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 180, 180), 1)
+    # PHASE 3: swap thumb area based on active tab
+    if strip_mode == "snapshots":
+        draw_snapshot_strip(canvas)
+    else:
+        n = len(filter_list)
+        for i, (name, _) in enumerate(filter_list):
+            tx = get_thumb_x(i, n)
+            if thumbs[i] is not None:
+                canvas[THUMB_Y:THUMB_Y + THUMB_H, tx:tx + THUMB_W] = thumbs[i]
+            border_color = (255, 255, 255) if i == selected else (90, 90, 90)
+            border_t     = 3               if i == selected else 1
+            pad          = 3               if i == selected else 1
+            cv2.rectangle(canvas, (tx - pad, THUMB_Y - pad),
+                          (tx + THUMB_W + pad - 1, THUMB_Y + THUMB_H + pad - 1), border_color, border_t)
+            (tw, _), _ = cv2.getTextSize(name, cv2.FONT_HERSHEY_SIMPLEX, 0.38, 1)
+            lx = tx + (THUMB_W - tw) // 2
+            cv2.putText(canvas, name, (lx, THUMB_Y + THUMB_H + 16),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (180, 180, 180), 1)
 
     if makeup_on:
         draw_makeup_controls(canvas)
@@ -403,7 +595,7 @@ def apply_filters(frame, filter_list):
     if overlay_on or makeup_on or edit_on:
         if beauty_on:
             landmarks = get_last_landmarks()
-        else:
+        if landmarks is None:
             landmarks, _ = get_landmarks_and_bbox(output)
 
     if landmarks is not None:
@@ -433,7 +625,7 @@ def apply_filters(frame, filter_list):
 # Main loop
 # ---------------------------------------------------------------------------
 def main():
-    global _frame_ox, _frame_oy
+    global _frame_ox, _frame_oy, snap_scroll
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -441,7 +633,7 @@ def main():
         return
 
     print("Photo Booth running.")
-    print("  Toggle buttons | s = save | r = reload | q = quit")
+    print("  Toggle buttons | s = save snapshot | [ ] = scroll snaps | r = reload | q = quit")
 
     cv2.namedWindow("Photo Booth")
     cv2.setMouseCallback("Photo Booth", mouse_callback)
@@ -456,9 +648,9 @@ def main():
 
         filter_list = get_filter_list()
 
-        fh, fw = frame.shape[:2]
-        scale      = min(CANVAS_W / fw, MAIN_H / fh)
-        main_size  = (int(fw * scale), int(fh * scale))
+        fh, fw    = frame.shape[:2]
+        scale     = min(CANVAS_W / fw, MAIN_H / fh)
+        main_size = (int(fw * scale), int(fh * scale))
         main_frame = cv2.resize(frame, main_size)
 
         _frame_ox = (CANVAS_W - main_size[0]) // 2
@@ -486,13 +678,21 @@ def main():
         if key == ord('q'):
             break
         elif key == ord('s'):
-            cv2.imwrite("snapshot.jpg", main_output)
-            print("Snapshot saved.")
+            # PHASE 3: save clean frame (pre-HUD) + auto-switch to Snaps tab
+            save_snapshot(main_output)
         elif key == ord('r'):
             reload_filters()
+        # PHASE 3: scroll snapshot strip
+        elif key == ord('['):
+            snap_scroll = max(0, snap_scroll - 1)
+        elif key == ord(']'):
+            max_off = max(0, len(session_snapshots) - _snap_max_visible())
+            snap_scroll = min(max_off, snap_scroll + 1)
 
     cap.release()
     cv2.destroyAllWindows()
+    n = len(session_snapshots)
+    print(f"\nSession ended. {n} snapshot{'s' if n != 1 else ''} saved to '{SNAPSHOT_DIR}/'.")
 
 if __name__ == "__main__":
     main()
